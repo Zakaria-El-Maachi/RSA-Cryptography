@@ -50,18 +50,42 @@ class SecureChatApp:
         # Bind enter key to send message
         self.msg_entry.bind('<Return>', lambda e: self.send_message())
 
+    def get_local_ip(self):
+        """Get the local IP address that can be used for network communication"""
+        try:
+            # Create a temporary socket to connect to an external address
+            # This won't actually establish a connection but will help us
+            # determine the local IP address used for external communications
+            temp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            temp_socket.connect(("8.8.8.8", 80))  # Google's DNS server
+            local_ip = temp_socket.getsockname()[0]
+            temp_socket.close()
+            return local_ip
+        except Exception:
+            # Fallback method if the above fails
+            try:
+                hostname = socket.gethostname()
+                local_ip = socket.gethostbyname(hostname)
+                if not local_ip.startswith("127."):
+                    return local_ip
+            except:
+                pass
+            return "127.0.0.1"  # Last resort fallback
+
     def start_server(self):
         """Start server to receive messages"""
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.bind(('', self.PORT))
+        # Allow port reuse
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Bind to all available interfaces
+        self.server_socket.bind(('0.0.0.0', self.PORT))
         self.server_socket.listen(5)
         
         # Start listening thread
         threading.Thread(target=self.listen_for_connections, daemon=True).start()
         
         # Log local IP
-        hostname = socket.gethostname()
-        local_ip = socket.gethostbyname(hostname)
+        local_ip = self.get_local_ip()
         self.history.insert(tk.END, f"Your IP address: {local_ip}\n")
 
     def listen_for_connections(self):
@@ -78,29 +102,28 @@ class SecureChatApp:
     def handle_client(self, client_socket, address):
         """Handle incoming messages from a client"""
         try:
-            # First receive the public key if we don't have it
-            if address[0] not in self.peer_public_keys:
+            while True:
                 data = client_socket.recv(4096)
-                if data:
-                    key_data = pickle.loads(data)
-                    if key_data.get('type') == 'public_key':
-                        self.peer_public_keys[address[0]] = {
-                            'e': key_data['e'],
-                            'n': key_data['n']
-                        }
-                        # Send our public key in response
-                        response = {
-                            'type': 'public_key',
-                            'e': self.rsa.get_public_key(),
-                            'n': self.rsa.get_modulus()
-                        }
-                        client_socket.send(pickle.dumps(response))
-            
-            # Then receive the message
-            data = client_socket.recv(4096)
-            if data:
+                if not data:
+                    break
+                    
                 message_data = pickle.loads(data)
-                if message_data.get('type') == 'message':
+                
+                if message_data.get('type') == 'public_key':
+                    # Store the peer's public key
+                    self.peer_public_keys[address[0]] = {
+                        'e': message_data['e'],
+                        'n': message_data['n']
+                    }
+                    # Send our public key in response
+                    response = {
+                        'type': 'public_key',
+                        'e': self.rsa.get_public_key(),
+                        'n': self.rsa.get_modulus()
+                    }
+                    client_socket.send(pickle.dumps(response))
+                    
+                elif message_data.get('type') == 'message':
                     encrypted_message = message_data['content']
                     decrypted_message = self.rsa.decrypt(encrypted_message)
                     self.history.insert(tk.END, f"{address[0]}: {decrypted_message}\n")
@@ -117,6 +140,7 @@ class SecureChatApp:
             try:
                 # Connect to peer
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)  # Add timeout to prevent hanging
                 sock.connect((ip, self.PORT))
                 
                 # Send our public key
@@ -170,6 +194,7 @@ class SecureChatApp:
             encrypted_message = temp_rsa.encrypt(message)
             
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)  # Add timeout
             sock.connect((ip, self.PORT))
             
             message_data = {

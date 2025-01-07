@@ -79,32 +79,35 @@ class SecureChatApp:
         """Handle incoming messages from a client"""
         try:
             # First receive the public key if we don't have it
-            if address[0] not in self.peer_public_keys:
-                data = client_socket.recv(4096)
-                if data:
-                    key_data = pickle.loads(data)
-                    if key_data.get('type') == 'public_key':
-                        self.peer_public_keys[address[0]] = {
-                            'e': key_data['e'],
-                            'n': key_data['n']
-                        }
-                        # Send our public key in response
-                        response = {
-                            'type': 'public_key',
-                            'e': self.rsa.get_public_key(),
-                            'n': self.rsa.get_modulus()
-                        }
-                        client_socket.send(pickle.dumps(response))
-            
-            # Then receive the message
             data = client_socket.recv(4096)
             if data:
                 message_data = pickle.loads(data)
-                if message_data.get('type') == 'message':
-                    encrypted_message = message_data['content']
-                    decrypted_message = self.rsa.decrypt(encrypted_message)
-                    self.history.insert(tk.END, f"{address[0]}: {decrypted_message}\n")
-                    self.history.see(tk.END)
+                
+                if message_data.get('type') == 'public_key':
+                    self.peer_public_keys[address[0]] = {
+                        'e': message_data['e'],
+                        'n': message_data['n']
+                    }
+                    # Send our public key in response
+                    response = {
+                        'type': 'public_key',
+                        'e': self.rsa.get_public_key(),
+                        'n': self.rsa.get_modulus()
+                    }
+                    client_socket.send(pickle.dumps(response))
+                
+                elif message_data.get('type') == 'message':
+                    # Get local IP to compare with sender's IP
+                    hostname = socket.gethostname()
+                    local_ip = socket.gethostbyname(hostname)
+                    
+                    sender_ip = message_data.get('sender_ip', address[0])
+                    
+                    if sender_ip != local_ip: 
+                        encrypted_message = message_data['content']
+                        decrypted_message = self.rsa.decrypt(encrypted_message)
+                        self.history.insert(tk.END, f"{sender_ip}: {decrypted_message}\n")
+                        self.history.see(tk.END)
         
         except Exception as e:
             print(f"Error handling client: {e}")
@@ -166,28 +169,33 @@ class SecureChatApp:
             temp_rsa.rsa.e = self.peer_public_keys[ip]['e']
             temp_rsa.rsa.n = self.peer_public_keys[ip]['n']
             
+            # Get local IP
+            hostname = socket.gethostname()
+            local_ip = socket.gethostbyname(hostname)
+            
             # Encrypt and send message
             encrypted_message = temp_rsa.encrypt(message)
             
+            # Create new socket for sending message
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((ip, self.PORT))
             
             message_data = {
                 'type': 'message',
-                'content': encrypted_message
+                'content': encrypted_message,
+                'sender_ip': local_ip
             }
             sock.send(pickle.dumps(message_data))
-            sock.close()
             
-            # Update history
+            # Update history and clear entry
             self.history.insert(tk.END, f"You: {message}\n")
             self.history.see(tk.END)
-            
-            # Clear message entry
             self.msg_entry.delete(0, tk.END)
             
         except Exception as e:
             self.history.insert(tk.END, f"Failed to send message: {str(e)}\n")
+        finally:
+            sock.close()
 
 if __name__ == "__main__":
     root = tk.Tk()
