@@ -3,6 +3,7 @@ from tkinter import ttk, scrolledtext
 import socket
 import threading
 import pickle
+import time
 from SecureRSA import SecureRSA
 
 class SecureChatApp:
@@ -18,12 +19,18 @@ class SecureChatApp:
         self.PORT = 5000
         self.server_socket = None
         self.peer_public_keys = {}  # Store peer public keys
+        self.server_ready = False  # Flag to indicate server is ready
         
         # GUI Components
         self.setup_gui()
         
         # Start server
         self.start_server()
+        
+        # Wait for server to be ready
+        while not self.server_ready:
+            time.sleep(0.1)
+            self.root.update()
 
     def setup_gui(self):
         # IP Address Frame
@@ -47,6 +54,8 @@ class SecureChatApp:
         
         ttk.Button(msg_frame, text="Send", command=self.send_message).pack(side=tk.RIGHT, padx=5)
         
+        ttk.Button(msg_frame, text="Test Connection", command=self.test_connection).pack(side=tk.RIGHT, padx=5)
+        
         # Bind enter key to send message
         self.msg_entry.bind('<Return>', lambda e: self.send_message())
 
@@ -54,8 +63,6 @@ class SecureChatApp:
         """Get the local IP address that can be used for network communication"""
         try:
             # Create a temporary socket to connect to an external address
-            # This won't actually establish a connection but will help us
-            # determine the local IP address used for external communications
             temp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             temp_socket.connect(("8.8.8.8", 80))  # Google's DNS server
             local_ip = temp_socket.getsockname()[0]
@@ -70,29 +77,48 @@ class SecureChatApp:
                     return local_ip
             except:
                 pass
-            return "127.0.0.1"  # Last resort fallback
+            return "127.0.0.1"
 
     def start_server(self):
         """Start server to receive messages"""
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Allow port reuse
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # Bind to all available interfaces
-        self.server_socket.bind(('0.0.0.0', self.PORT))
-        self.server_socket.listen(5)
-        
-        # Start listening thread
-        threading.Thread(target=self.listen_for_connections, daemon=True).start()
-        
-        # Log local IP
-        local_ip = self.get_local_ip()
-        self.history.insert(tk.END, f"Your IP address: {local_ip}\n")
+        try:
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Try to bind to the port
+            attempts = 0
+            while attempts < 5:
+                try:
+                    self.server_socket.bind(('0.0.0.0', self.PORT))
+                    break
+                except OSError:
+                    attempts += 1
+                    time.sleep(1)
+                    if attempts == 5:
+                        raise Exception("Could not bind to port after 5 attempts")
+
+            self.server_socket.listen(5)
+            
+            # Log local IP
+            local_ip = self.get_local_ip()
+            self.history.insert(tk.END, f"Your IP address: {local_ip}\n")
+            self.history.insert(tk.END, f"Server listening on port {self.PORT}\n")
+            
+            # Start listening thread
+            self.server_ready = True
+            threading.Thread(target=self.listen_for_connections, daemon=True).start()
+            
+        except Exception as e:
+            self.history.insert(tk.END, f"Failed to start server: {str(e)}\n")
+            raise
 
     def listen_for_connections(self):
         """Listen for incoming connections"""
+        self.history.insert(tk.END, "Started listening for connections...\n")
         while True:
             try:
                 client_socket, address = self.server_socket.accept()
+                client_socket.settimeout(10)  # Set timeout for operations
                 threading.Thread(target=self.handle_client, 
                                args=(client_socket, address),
                                daemon=True).start()
@@ -102,11 +128,8 @@ class SecureChatApp:
     def handle_client(self, client_socket, address):
         """Handle incoming messages from a client"""
         try:
-            while True:
-                data = client_socket.recv(4096)
-                if not data:
-                    break
-                    
+            data = client_socket.recv(4096)
+            if data:
                 message_data = pickle.loads(data)
                 
                 if message_data.get('type') == 'public_key':
@@ -128,6 +151,13 @@ class SecureChatApp:
                     decrypted_message = self.rsa.decrypt(encrypted_message)
                     self.history.insert(tk.END, f"{address[0]}: {decrypted_message}\n")
                     self.history.see(tk.END)
+                    
+                elif message_data.get('type') == 'test':
+                    self.history.insert(tk.END, f"Received test message from {address[0]}: {message_data['content']}\n")
+                    self.history.see(tk.END)
+                    
+                # Acknowledge receipt
+                client_socket.send(pickle.dumps({'type': 'ack'}))
         
         except Exception as e:
             print(f"Error handling client: {e}")
@@ -141,7 +171,17 @@ class SecureChatApp:
                 # Connect to peer
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(5)  # Add timeout to prevent hanging
-                sock.connect((ip, self.PORT))
+                
+                # Try to connect with multiple attempts
+                max_attempts = 3
+                for attempt in range(max_attempts):
+                    try:
+                        sock.connect((ip, self.PORT))
+                        break
+                    except socket.error as e:
+                        if attempt == max_attempts - 1:  # Last attempt
+                            raise e
+                        time.sleep(1)  # Wait before retrying
                 
                 # Send our public key
                 key_data = {
@@ -160,12 +200,14 @@ class SecureChatApp:
                             'e': key_data['e'],
                             'n': key_data['n']
                         }
+                        return True
                 
-                sock.close()
-                return True
             except Exception as e:
                 print(f"Error getting peer public key: {e}")
+                self.history.insert(tk.END, f"Connection error: {str(e)}\n")
                 return False
+            finally:
+                sock.close()
         return True
 
     def send_message(self):
@@ -202,17 +244,56 @@ class SecureChatApp:
                 'content': encrypted_message
             }
             sock.send(pickle.dumps(message_data))
-            sock.close()
             
-            # Update history
-            self.history.insert(tk.END, f"You: {message}\n")
-            self.history.see(tk.END)
-            
-            # Clear message entry
-            self.msg_entry.delete(0, tk.END)
+            # Wait for acknowledgment
+            response = sock.recv(4096)
+            if response:
+                response_data = pickle.loads(response)
+                if response_data.get('type') == 'ack':
+                    # Update history
+                    self.history.insert(tk.END, f"You: {message}\n")
+                    self.history.see(tk.END)
+                    
+                    # Clear message entry
+                    self.msg_entry.delete(0, tk.END)
             
         except Exception as e:
             self.history.insert(tk.END, f"Failed to send message: {str(e)}\n")
+        finally:
+            sock.close()
+            
+    def test_connection(self):
+        """Test connection to receiver without encryption"""
+        ip = self.ip_entry.get().strip()
+        if not ip:
+            self.history.insert(tk.END, "Please enter receiver's IP address\n")
+            return
+            
+        try:
+            # Create test socket
+            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_socket.settimeout(5)
+            
+            self.history.insert(tk.END, f"Attempting to connect to {ip}:{self.PORT}...\n")
+            test_socket.connect((ip, self.PORT))
+            
+            # Send simple test message
+            test_message = pickle.dumps({
+                'type': 'test',
+                'content': 'Test message from sender'
+            })
+            test_socket.send(test_message)
+            
+            self.history.insert(tk.END, "Test message sent successfully!\n")
+            
+        except ConnectionRefusedError:
+            self.history.insert(tk.END, f"Connection refused - Is the receiver running and listening?\n")
+        except socket.timeout:
+            self.history.insert(tk.END, f"Connection timed out - Check IP and port\n")
+        except Exception as e:
+            self.history.insert(tk.END, f"Test failed: {str(e)}\n")
+        finally:
+            test_socket.close()
 
 if __name__ == "__main__":
     root = tk.Tk()
