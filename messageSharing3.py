@@ -16,7 +16,7 @@ class SecureChatApp:
         self.rsa.generate_keys(2048)
         
         # Network settings
-        self.PORT = 5000
+        self.PORT = 12345
         self.server_socket = None
         self.peer_public_keys = {}  # Store peer public keys
         self.server_ready = False  # Flag to indicate server is ready
@@ -89,10 +89,13 @@ class SecureChatApp:
             attempts = 0
             while attempts < 5:
                 try:
+                    self.history.insert(tk.END, f"Attempting to bind to port {self.PORT}...\n")
                     self.server_socket.bind(('0.0.0.0', self.PORT))
+                    self.history.insert(tk.END, f"Successfully bound to port {self.PORT}\n")
                     break
-                except OSError:
+                except OSError as e:
                     attempts += 1
+                    self.history.insert(tk.END, f"Bind attempt {attempts} failed: {str(e)}\n")
                     time.sleep(1)
                     if attempts == 5:
                         raise Exception("Could not bind to port after 5 attempts")
@@ -274,7 +277,11 @@ class SecureChatApp:
             test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             test_socket.settimeout(5)
             
-            self.history.insert(tk.END, f"Attempting to connect to {ip}:{self.PORT}...\n")
+            self.history.insert(tk.END, f"Local machine info:\n")
+            self.history.insert(tk.END, f"- Using port: {self.PORT}\n")
+            self.history.insert(tk.END, f"- Local IP: {self.get_local_ip()}\n")
+            self.history.insert(tk.END, f"\nAttempting to connect to {ip}:{self.PORT}...\n")
+            
             test_socket.connect((ip, self.PORT))
             
             # Send simple test message
